@@ -1,0 +1,68 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isPatient(uid) { return isSignedIn() && request.auth.uid == uid; }
+    function isStaff() { 
+      return isSignedIn() && 
+        exists(/databases/$(database)/documents/staff/$(request.auth.uid));
+    }
+    function existingData() { return resource.data; }
+    function incomingData() { return request.resource.data; }
+
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+
+    // --- Collections ---
+
+    // Patients
+    match /patients/{patientId} {
+      allow get: if isPatient(patientId) || isStaff();
+      allow list: if isStaff();
+      allow create: if isPatient(patientId) && 
+        incomingData().keys().hasAll(['uid', 'name', 'email', 'role', 'createdAt']) &&
+        incomingData().role == 'patient';
+      allow update: if isPatient(patientId) && 
+        incomingData().diff(existingData()).affectedKeys().hasOnly(['name', 'phone', 'updatedAt']);
+    }
+
+    // Staff
+    match /staff/{staffId} {
+      allow get: if isSignedIn() && (request.auth.uid == staffId || isStaff());
+      allow list: if isStaff();
+      allow write: if false; // Managed via Admin/Console only for security
+    }
+
+    // Appointments
+    match /appointments/{appointmentId} {
+      function isValidAppointment(data) {
+        return data.patientId is string &&
+               data.patientName is string &&
+               data.doctorName is string &&
+               data.date is string &&
+               data.time is string &&
+               data.status in ['pending', 'confirmed', 'cancelled', 'completed'];
+      }
+
+      allow read: if isStaff() || (isSignedIn() && existingData().patientId == request.auth.uid);
+      
+      allow create: if isSignedIn() && 
+        incomingData().patientId == request.auth.uid &&
+        isValidAppointment(incomingData()) &&
+        incomingData().status == 'pending';
+        
+      allow update: if isStaff() || (
+        isPatient(existingData().patientId) && 
+        incomingData().diff(existingData()).affectedKeys().hasOnly(['status', 'notes', 'updatedAt']) &&
+        incomingData().status == 'cancelled'
+      );
+    }
+  }
+}
